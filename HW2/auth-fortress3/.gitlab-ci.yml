@@ -1,0 +1,72 @@
+stages:
+  - migrate
+  - deploy
+
+
+variables:
+    JDBC: 'jdbc:postgresql://$DB_HOST:$DB_PORT/$DB_NAME'
+    FLYWAY_DOCKER_IMAGE: redgate/flyway:latest
+    FLYWAY_DOCKER_CONTAINER_NAME: flyway-container
+    FLYWAY_MIGRATIONS_PATH: $CI_PROJECT_DIR/flyway/db-migrations
+    FLYWAY_DOCKER_RUN: 'docker run --rm -v $FLYWAY_MIGRATIONS_PATH:/flyway/sql $FLYWAY_DOCKER_IMAGE -user=$DB_USER -password=$DB_PASSWORD -licenseKey=$FLYWAY_LICENSE_KEY'
+
+.flyway_job:
+  image: docker:latest
+  services:
+    - docker:dind #This enables Docker in Docker mode. Which allows for the Flyway Container to be created within the G
+  before_script:
+    - pwd
+    - ls
+    - echo "${FLYWAY_DOCKER_RUN}"
+    - docker pull redgate/flyway:latest
+  artifacts:
+    paths:
+    expire_in: 1 week
+
+migrate:
+  stage: migrate
+  extends: .flyway_job
+  script:
+   - $FLYWAY_DOCKER_RUN -validateMigrationNaming="true" info clean info -url=${JDBC} -cleanDisabled='false'
+   - $FLYWAY_DOCKER_RUN -validateMigrationNaming="true" info migrate info -url=${JDBC} -cleanDisabled='true'
+   - echo "The job completed successfully with Flyway in the Test environment"
+  only:
+    changes:
+      - flyway/**
+
+  
+deploy:
+  stage: deploy
+  before_script:
+    - 'command -v ssh-agent >/dev/null || ( apk add --update openssh )'
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan $VM_IPADDRESS >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - ssh $SSH_USER@$VM_IPADDRESS "
+      sudo yum update -y &&
+      sudo yum install -y git &&
+      sudo yum install -y docker &&
+      sudo systemctl start docker &&
+      sudo systemctl enable docker &&
+      sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.2/docker-compose-$(uname -s)-$(uname -m)" -o /  usr/local/bin/docker-compose &&
+      sudo chmod +x /usr/local/bin/docker-compose &&
+      sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose &&
+      sudo rm -rf app &&
+      git clone $CI_REPOSITORY_URL app &&
+      cd app &&
+      git checkout 2b311d79 &&
+      echo \"DATABASE_URL=$DATABASE_URL\" >> .env &&
+      echo \"RELEASE=$RELEASE\" >> .env &&
+      sudo bash systemd_setup.sh
+      "
+  only:
+    - main
+    - /^release-.*$/
+  environment:
+    name: production
+    url: http://$VM_IPADDRESS:8000
+

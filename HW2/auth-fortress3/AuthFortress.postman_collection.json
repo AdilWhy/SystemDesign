@@ -1,0 +1,106 @@
+{
+	"info": {
+		"_postman_id": "f3435fa0-40d5-457b-867b-0e884be51517",
+		"name": "AuthFortress",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "26770760"
+	},
+	"item": [
+		{
+			"name": "Get token",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "urlencoded",
+					"urlencoded": [
+						{
+							"key": "client_id",
+							"value": "devops",
+							"type": "text"
+						},
+						{
+							"key": "scope",
+							"value": "push_send",
+							"type": "text"
+						},
+						{
+							"key": "client_secret",
+							"value": "devops",
+							"type": "text"
+						},
+						{
+							"key": "grant_type",
+							"value": "client_credentials",
+							"type": "text"
+						}
+					]
+				},
+				"url": {
+					"raw": "{{api_link}}/token/",
+					"host": [
+						"{{api_link}}"
+					],
+					"path": [
+						"token",
+						""
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Check token",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer 41EE8F803BB206CEB1ADA9",
+						"type": "text"
+					}
+				],
+				"url": {
+					"raw": "{{api_link}}/check/",
+					"host": [
+						"{{api_link}}"
+					],
+					"path": [
+						"check",
+						""
+					]
+				}
+			},
+			"response": []
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"packages": {},
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"packages": {},
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "api_link",
+			"value": "http://localhost:8000",
+			"type": "string"
+		}
+	]
+}
