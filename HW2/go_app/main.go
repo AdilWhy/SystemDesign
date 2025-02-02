@@ -156,9 +156,7 @@ func main() {
 	if err := godotenv.Load(".env"); err != nil {
 		log.Println("Error loading .env file\n" + err.Error())
 	}
-	log.Println("STRT")
 	for {
-		log.Println("ASDSA")
 		var err error
 		dbconn, err = pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
 		if err != nil {

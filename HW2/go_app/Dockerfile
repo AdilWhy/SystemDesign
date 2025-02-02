@@ -15,26 +15,12 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
 
 FROM gcr.io/distroless/static-debian12 AS final
 
-RUN --mount=type=cache,target=/var/cache/apk \
-    apk --update add \
-    ca-certificates \
-    tzdata \
-    && \
-    update-ca-certificates
-
-ARG UID=10001
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/nonexistent" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    appuser
-USER appuser
+WORKDIR /bin
 
 COPY --from=build /bin/server /bin/
+COPY .env /bin/
+COPY users.json /bin/
 
 EXPOSE 8000
 
-ENTRYPOINT [ "/bin/server" ]
+ENTRYPOINT [ "./server" ]
