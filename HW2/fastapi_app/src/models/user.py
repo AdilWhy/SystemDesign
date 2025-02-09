@@ -1,8 +1,11 @@
 from sqlmodel import SQLModel, Field
-from typing import List, Optional
+from typing import List
+from sqlalchemy import Column, String
+from sqlalchemy.dialects.postgresql import ARRAY
+
 
 class User(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    client_secret: str
-    scopes: str
-    tokens: str
+    client_id: str = Field(sa_column=Column(String(50), primary_key=True))
+    client_secret: str = Field(sa_column=Column(String))
+    scope: List[str] = Field(default_factory=list,
+                             sa_column=Column(ARRAY(String)))
