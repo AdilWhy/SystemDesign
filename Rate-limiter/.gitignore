@@ -1,0 +1,8 @@
+/venv
+.venv
+.env
+.idea
+/myenv
+__pycache__/
+*.pdf
+*.exe
