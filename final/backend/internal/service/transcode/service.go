@@ -3,34 +3,36 @@ package transcode
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
-	
+
 	"github.com/google/uuid"
-	
-	"videostreaming/internal/service/video"
+
 	pb "videostreaming/proto/video"
 )
 
-// Storage defines interface for persisting transcoding job information
-type Storage interface {
+// TranscodeStorage defines the interface for transcoding job storage
+type TranscodeStorage interface {
 	SaveTranscodingJob(ctx context.Context, job *TranscodingJob) error
 	GetTranscodingJobs(ctx context.Context, videoID string) ([]*TranscodingJob, error)
 	UpdateTranscodingJob(ctx context.Context, job *TranscodingJob) error
 }
 
-// FFmpegClient defines interface for interacting with FFmpeg transcoding
+// FFmpegClient defines the interface for FFmpeg operations
 type FFmpegClient interface {
 	TranscodeVideo(ctx context.Context, inputPath string, outputPath string, options TranscodeOptions) error
 	GetMediaInfo(ctx context.Context, filePath string) (*MediaInfo, error)
 }
 
-// BlobStorage defines interface for accessing video files
-type BlobStorage interface {
+// S3Storage defines the interface for S3 storage operations
+type S3Storage interface {
+	GenerateUploadURL(ctx context.Context, key string, contentType string, expiresIn time.Duration) (string, error)
 	GenerateDownloadURL(ctx context.Context, key string, expiresIn time.Duration) (string, error)
+	DeleteObject(ctx context.Context, key string) error
 }
 
-// NotificationService defines interface for sending notifications about transcoding status
+// NotificationService defines the interface for notifications
 type NotificationService interface {
 	NotifyTranscodingComplete(ctx context.Context, videoID string, status pb.TranscodingStatus) error
 	NotifyTranscodingProgress(ctx context.Context, videoID string, progress float32) error
@@ -38,16 +40,16 @@ type NotificationService interface {
 
 // TranscodingJob represents a video transcoding job
 type TranscodingJob struct {
-	ID          string
-	VideoID     string
-	InputPath   string
-	OutputPaths map[pb.VideoResolution]string
-	Status      pb.TranscodingStatus
-	Progress    float32
-	Resolution  pb.VideoResolution
-	StartedAt   time.Time
-	FinishedAt  *time.Time
-	Error       string
+	ID             string
+	VideoID        string
+	InputPath      string
+	OutputPath     string
+	Resolution     pb.VideoResolution
+	Status         pb.TranscodingStatus
+	Progress       float32
+	StartTime      time.Time
+	CompletionTime *time.Time
+	ErrorMessage   string
 }
 
 // MediaInfo contains metadata about a media file
@@ -72,18 +74,18 @@ type TranscodeOptions struct {
 
 // Service handles video transcoding
 type Service struct {
-	storage        Storage
-	ffmpeg         FFmpegClient
-	blobStorage    BlobStorage
-	notification   NotificationService
-	
+	storage             TranscodeStorage
+	ffmpegClient        FFmpegClient
+	s3Storage           S3Storage
+	notificationService NotificationService
+
 	// Configuration
 	outputKeyPrefix  string
 	availableFormats []string
 	bitrates         map[pb.VideoResolution]string
 	audioBitrate     string
 	codec            string
-	
+
 	// State
 	jobs     map[string]*jobState
 	jobsLock sync.RWMutex
@@ -98,14 +100,19 @@ type jobState struct {
 }
 
 // NewService creates a new transcoding service
-func NewService(storage Storage, ffmpeg FFmpegClient, blobStorage BlobStorage, notification NotificationService) *Service {
+func NewService(
+	storage TranscodeStorage,
+	ffmpegClient FFmpegClient,
+	s3Storage S3Storage,
+	notificationService NotificationService,
+) *Service {
 	return &Service{
-		storage:        storage,
-		ffmpeg:         ffmpeg,
-		blobStorage:    blobStorage,
-		notification:   notification,
-		outputKeyPrefix: "transcoded/",
-		availableFormats: []string{"hls", "mp4"},
+		storage:             storage,
+		ffmpegClient:        ffmpegClient,
+		s3Storage:           s3Storage,
+		notificationService: notificationService,
+		outputKeyPrefix:     "transcoded/",
+		availableFormats:    []string{"hls", "mp4"},
 		bitrates: map[pb.VideoResolution]string{
 			pb.VideoResolution_VIDEO_RESOLUTION_240P:  "500k",
 			pb.VideoResolution_VIDEO_RESOLUTION_360P:  "800k",
@@ -121,152 +128,112 @@ func NewService(storage Storage, ffmpeg FFmpegClient, blobStorage BlobStorage, n
 	}
 }
 
-// StartTranscoding begins transcoding a video
+// StartTranscoding begins the transcoding process for a video
 func (s *Service) StartTranscoding(ctx context.Context, videoID string, inputPath string) error {
-	// Get media info to determine appropriate resolutions
-	mediaInfo, err := s.ffmpeg.GetMediaInfo(ctx, inputPath)
+	// Get media info to determine appropriate transcoding parameters
+	mediaInfo, err := s.ffmpegClient.GetMediaInfo(ctx, inputPath)
 	if err != nil {
 		return fmt.Errorf("failed to get media info: %w", err)
 	}
-	
-	// Determine resolutions to transcode to based on original video resolution
+
+	// Create transcoding jobs for different resolutions
 	resolutions := s.determineTargetResolutions(mediaInfo.Width, mediaInfo.Height)
-	
-	// Create and save transcoding jobs for each resolution
-	jobs := make([]*TranscodingJob, 0, len(resolutions))
-	now := time.Now()
-	
+
 	for _, resolution := range resolutions {
+		jobID := uuid.New().String()
 		outputPath := fmt.Sprintf("%s%s/%s", s.outputKeyPrefix, videoID, s.getResolutionPath(resolution))
-		
+
 		job := &TranscodingJob{
-			ID:         uuid.New().String(),
+			ID:         jobID,
 			VideoID:    videoID,
 			InputPath:  inputPath,
-			OutputPaths: map[pb.VideoResolution]string{
-				resolution: outputPath,
-			},
-			Status:     pb.TranscodingStatus_TRANSCODING_STATUS_QUEUED,
+			OutputPath: outputPath,
 			Resolution: resolution,
-			StartedAt:  now,
+			Status:     pb.TranscodingStatus_TRANSCODING_STATUS_QUEUED,
 			Progress:   0,
+			StartTime:  time.Now(),
 		}
-		
+
+		// Save the job to storage
 		if err := s.storage.SaveTranscodingJob(ctx, job); err != nil {
 			return fmt.Errorf("failed to save transcoding job: %w", err)
 		}
-		
-		jobs = append(jobs, job)
+
+		// Start transcoding in a goroutine
+		go s.processTranscoding(context.Background(), job)
 	}
-	
-	// Store job state
-	s.jobsLock.Lock()
-	s.jobs[videoID] = &jobState{
-		videoID:   videoID,
-		jobs:      jobs,
-		progress:  0,
-		status:    pb.TranscodingStatus_TRANSCODING_STATUS_QUEUED,
-		updatedAt: now,
-	}
-	s.jobsLock.Unlock()
-	
-	// Start transcoding in goroutine
-	go s.processTranscodingJobs(context.Background(), videoID, jobs)
-	
+
 	return nil
 }
 
-// GetTranscodingStatus retrieves the status of a video's transcoding
-func (s *Service) GetTranscodingStatus(ctx context.Context, videoID string) (*video.TranscodingStatus, error) {
-	// Check in-memory cache first
-	s.jobsLock.RLock()
-	jobState, exists := s.jobs[videoID]
-	s.jobsLock.RUnlock()
-	
-	var jobs []*TranscodingJob
-	var status pb.TranscodingStatus
-	var progress float32
-	
-	if exists {
-		jobs = jobState.jobs
-		status = jobState.status
-		progress = jobState.progress
-	} else {
-		// Fetch from storage
-		var err error
-		jobs, err = s.storage.GetTranscodingJobs(ctx, videoID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get transcoding jobs: %w", err)
-		}
-		
-		if len(jobs) == 0 {
-			return nil, fmt.Errorf("no transcoding jobs found for video: %s", videoID)
-		}
-		
-		// Calculate overall status and progress
-		status = s.calculateOverallStatus(jobs)
-		progress = s.calculateOverallProgress(jobs)
+// GetTranscodingStatus returns the current status of the transcoding jobs for a video
+func (s *Service) GetTranscodingStatus(ctx context.Context, videoID string) (*pb.TranscodingStatusResponse, error) {
+	jobs, err := s.storage.GetTranscodingJobs(ctx, videoID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get transcoding jobs: %w", err)
 	}
-	
-	// Convert to result format
-	result := &video.TranscodingStatus{
-		VideoID:         videoID,
-		Status:          status,
-		OverallProgress: progress,
+
+	if len(jobs) == 0 {
+		return &pb.TranscodingStatusResponse{
+			VideoId: videoID,
+			Status:  pb.TranscodingStatus_TRANSCODING_STATUS_NOT_FOUND,
+		}, nil
 	}
-	
-	jobsResult := make([]*video.TranscodingJob, 0, len(jobs))
-	for _, job := range jobs {
-		jobsResult = append(jobsResult, &video.TranscodingJob{
-			JobID:        job.ID,
+
+	// Calculate overall status and progress
+	var totalProgress float32
+	var errorCount int
+	var completedCount int
+
+	protoJobs := make([]*pb.TranscodingJob, len(jobs))
+
+	for i, job := range jobs {
+		totalProgress += job.Progress
+
+		if job.Status == pb.TranscodingStatus_TRANSCODING_STATUS_ERROR {
+			errorCount++
+		} else if job.Status == pb.TranscodingStatus_TRANSCODING_STATUS_COMPLETED {
+			completedCount++
+		}
+
+		protoJobs[i] = &pb.TranscodingJob{
+			JobId:        job.ID,
 			Resolution:   job.Resolution,
 			Status:       job.Status,
 			Progress:     job.Progress,
-			ErrorMessage: job.Error,
-		})
+			ErrorMessage: job.ErrorMessage,
+		}
 	}
-	
-	result.Jobs = jobsResult
-	
-	return result, nil
+
+	overallProgress := totalProgress / float32(len(jobs))
+	var overallStatus pb.TranscodingStatus
+
+	if errorCount == len(jobs) {
+		overallStatus = pb.TranscodingStatus_TRANSCODING_STATUS_ERROR
+	} else if completedCount == len(jobs) {
+		overallStatus = pb.TranscodingStatus_TRANSCODING_STATUS_COMPLETED
+	} else {
+		overallStatus = pb.TranscodingStatus_TRANSCODING_STATUS_PROCESSING
+	}
+
+	return &pb.TranscodingStatusResponse{
+		VideoId:         videoID,
+		Status:          overallStatus,
+		Jobs:            protoJobs,
+		OverallProgress: overallProgress,
+	}, nil
 }
 
-// processTranscodingJobs handles the transcoding workflow
-func (s *Service) processTranscodingJobs(ctx context.Context, videoID string, jobs []*TranscodingJob) {
-	// Update status to processing
-	s.updateJobStatus(ctx, videoID, pb.TranscodingStatus_TRANSCODING_STATUS_PROCESSING, 0)
-	
-	// Process each job sequentially
-	// In a real system, you might want to distribute these jobs to worker nodes
-	for _, job := range jobs {
-		s.processJob(ctx, job)
-	}
-	
-	// Check final status
-	s.jobsLock.RLock()
-	jobState, exists := s.jobs[videoID]
-	s.jobsLock.RUnlock()
-	
-	if exists {
-		finalStatus := s.calculateOverallStatus(jobState.jobs)
-		s.updateJobStatus(ctx, videoID, finalStatus, 100)
-		
-		// Notify about completion
-		s.notification.NotifyTranscodingComplete(ctx, videoID, finalStatus)
-	}
-}
-
-// processJob handles a single transcoding job
-func (s *Service) processJob(ctx context.Context, job *TranscodingJob) {
+// processTranscoding handles the actual transcoding process for a job
+func (s *Service) processTranscoding(ctx context.Context, job *TranscodingJob) {
 	// Update job status to processing
 	job.Status = pb.TranscodingStatus_TRANSCODING_STATUS_PROCESSING
-	job.Progress = 0
-	
 	if err := s.storage.UpdateTranscodingJob(ctx, job); err != nil {
-		fmt.Printf("Failed to update job status: %v\n", err)
+		log.Printf("Failed to update transcoding job status: %v", err)
+		return
 	}
-	
-	// Create transcoding options
+
+	// Prepare transcoding options based on target resolution
 	options := TranscodeOptions{
 		Resolution:  job.Resolution,
 		VideoBitrate: s.bitrates[job.Resolution],
@@ -275,120 +242,34 @@ func (s *Service) processJob(ctx context.Context, job *TranscodingJob) {
 		Codec:        s.codec,
 		FrameRate:    30,
 	}
-	
-	// Get output path for this resolution
-	outputPath, ok := job.OutputPaths[job.Resolution]
-	if !ok {
-		job.Status = pb.TranscodingStatus_TRANSCODING_STATUS_FAILED
-		job.Error = "missing output path"
-		s.updateJobStatus(ctx, job.VideoID, job.Status, job.Progress)
+
+	// Start transcoding
+	if err := s.ffmpegClient.TranscodeVideo(ctx, job.InputPath, job.OutputPath, options); err != nil {
+		// Handle transcoding error
+		job.Status = pb.TranscodingStatus_TRANSCODING_STATUS_ERROR
+		job.ErrorMessage = err.Error()
+		if err := s.storage.UpdateTranscodingJob(ctx, job); err != nil {
+			log.Printf("Failed to update transcoding job error: %v", err)
+		}
+
+		// Notify about error
+		s.notificationService.NotifyTranscodingComplete(ctx, job.VideoID, pb.TranscodingStatus_TRANSCODING_STATUS_ERROR)
 		return
 	}
-	
-	// Start transcoding
-	err := s.ffmpeg.TranscodeVideo(ctx, job.InputPath, outputPath, options)
-	
-	now := time.Now()
-	if err != nil {
-		job.Status = pb.TranscodingStatus_TRANSCODING_STATUS_FAILED
-		job.Error = err.Error()
-		job.Progress = 0
-	} else {
-		job.Status = pb.TranscodingStatus_TRANSCODING_STATUS_COMPLETED
-		job.Progress = 100
-	}
-	
-	job.FinishedAt = &now
-	
-	// Update job in storage
+
+	// Update job status to completed
+	job.Status = pb.TranscodingStatus_TRANSCODING_STATUS_COMPLETED
+	job.Progress = 100
+	completionTime := time.Now()
+	job.CompletionTime = &completionTime
+
 	if err := s.storage.UpdateTranscodingJob(ctx, job); err != nil {
-		fmt.Printf("Failed to update job: %v\n", err)
+		log.Printf("Failed to update transcoding job completion: %v", err)
+		return
 	}
-	
-	// Update in-memory state
-	s.jobsLock.Lock()
-	if jobState, ok := s.jobs[job.VideoID]; ok {
-		for i, j := range jobState.jobs {
-			if j.ID == job.ID {
-				jobState.jobs[i] = job
-				break
-			}
-		}
-		jobState.status = s.calculateOverallStatus(jobState.jobs)
-		jobState.progress = s.calculateOverallProgress(jobState.jobs)
-		jobState.updatedAt = now
-	}
-	s.jobsLock.Unlock()
-}
 
-// updateJobStatus updates the status and progress of a transcoding job
-func (s *Service) updateJobStatus(ctx context.Context, videoID string, status pb.TranscodingStatus, progress float32) {
-	s.jobsLock.Lock()
-	if jobState, ok := s.jobs[videoID]; ok {
-		jobState.status = status
-		jobState.progress = progress
-		jobState.updatedAt = time.Now()
-	}
-	s.jobsLock.Unlock()
-	
-	// Send notification about progress
-	s.notification.NotifyTranscodingProgress(ctx, videoID, progress)
-}
-
-// calculateOverallStatus determines the overall status of transcoding jobs
-func (s *Service) calculateOverallStatus(jobs []*TranscodingJob) pb.TranscodingStatus {
-	if len(jobs) == 0 {
-		return pb.TranscodingStatus_TRANSCODING_STATUS_UNSPECIFIED
-	}
-	
-	hasQueued := false
-	hasProcessing := false
-	hasFailures := false
-	
-	for _, job := range jobs {
-		switch job.Status {
-		case pb.TranscodingStatus_TRANSCODING_STATUS_FAILED:
-			hasFailures = true
-		case pb.TranscodingStatus_TRANSCODING_STATUS_PROCESSING:
-			hasProcessing = true
-		case pb.TranscodingStatus_TRANSCODING_STATUS_QUEUED:
-			hasQueued = true
-		}
-	}
-	
-	// Determine overall status
-	if hasProcessing || hasQueued {
-		return pb.TranscodingStatus_TRANSCODING_STATUS_PROCESSING
-	} else if hasFailures {
-		// If there are failures but some jobs completed, consider it partially completed
-		hasCompleted := false
-		for _, job := range jobs {
-			if job.Status == pb.TranscodingStatus_TRANSCODING_STATUS_COMPLETED {
-				hasCompleted = true
-				break
-			}
-		}
-		if hasCompleted {
-			return pb.TranscodingStatus_TRANSCODING_STATUS_COMPLETED
-		}
-		return pb.TranscodingStatus_TRANSCODING_STATUS_FAILED
-	}
-	
-	return pb.TranscodingStatus_TRANSCODING_STATUS_COMPLETED
-}
-
-// calculateOverallProgress calculates the overall progress of transcoding jobs
-func (s *Service) calculateOverallProgress(jobs []*TranscodingJob) float32 {
-	if len(jobs) == 0 {
-		return 0
-	}
-	
-	var totalProgress float32
-	for _, job := range jobs {
-		totalProgress += job.Progress
-	}
-	
-	return totalProgress / float32(len(jobs))
+	// Notify about completion
+	s.notificationService.NotifyTranscodingComplete(ctx, job.VideoID, pb.TranscodingStatus_TRANSCODING_STATUS_COMPLETED)
 }
 
 // determineTargetResolutions selects appropriate resolutions based on the source video
@@ -397,12 +278,12 @@ func (s *Service) determineTargetResolutions(width int, height int) []pb.VideoRe
 	if height > width {
 		maxDimension = height
 	}
-	
+
 	resolutions := []pb.VideoResolution{}
-	
+
 	// Add resolutions based on source video
 	if maxDimension >= 3840 { // 4K UHD
-		resolutions = append(resolutions, 
+		resolutions = append(resolutions,
 			pb.VideoResolution_VIDEO_RESOLUTION_2160P,
 			pb.VideoResolution_VIDEO_RESOLUTION_1440P,
 			pb.VideoResolution_VIDEO_RESOLUTION_1080P,
@@ -410,31 +291,31 @@ func (s *Service) determineTargetResolutions(width int, height int) []pb.VideoRe
 			pb.VideoResolution_VIDEO_RESOLUTION_480P,
 			pb.VideoResolution_VIDEO_RESOLUTION_360P)
 	} else if maxDimension >= 2560 { // 1440p
-		resolutions = append(resolutions, 
+		resolutions = append(resolutions,
 			pb.VideoResolution_VIDEO_RESOLUTION_1440P,
 			pb.VideoResolution_VIDEO_RESOLUTION_1080P,
 			pb.VideoResolution_VIDEO_RESOLUTION_720P,
 			pb.VideoResolution_VIDEO_RESOLUTION_480P,
 			pb.VideoResolution_VIDEO_RESOLUTION_360P)
 	} else if maxDimension >= 1920 { // 1080p
-		resolutions = append(resolutions, 
+		resolutions = append(resolutions,
 			pb.VideoResolution_VIDEO_RESOLUTION_1080P,
 			pb.VideoResolution_VIDEO_RESOLUTION_720P,
 			pb.VideoResolution_VIDEO_RESOLUTION_480P,
 			pb.VideoResolution_VIDEO_RESOLUTION_360P)
 	} else if maxDimension >= 1280 { // 720p
-		resolutions = append(resolutions, 
+		resolutions = append(resolutions,
 			pb.VideoResolution_VIDEO_RESOLUTION_720P,
 			pb.VideoResolution_VIDEO_RESOLUTION_480P,
 			pb.VideoResolution_VIDEO_RESOLUTION_360P)
 	} else if maxDimension >= 854 { // 480p
-		resolutions = append(resolutions, 
+		resolutions = append(resolutions,
 			pb.VideoResolution_VIDEO_RESOLUTION_480P,
 			pb.VideoResolution_VIDEO_RESOLUTION_360P)
 	} else {
 		resolutions = append(resolutions, pb.VideoResolution_VIDEO_RESOLUTION_360P)
 	}
-	
+
 	return resolutions
 }
 

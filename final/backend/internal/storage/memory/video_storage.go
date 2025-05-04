@@ -2,109 +2,95 @@ package memory
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
-
+	
 	"videostreaming/internal/service/video"
 )
 
-// VideoStorage implements the video.Storage interface using in-memory maps
+// VideoStorage implements an in-memory storage for videos
 type VideoStorage struct {
-	videos      map[string]*video.Video
-	streamKeys  map[string]string
+	videos     map[string]*video.Video
 	liveStreams map[string]*video.LiveStream
-	mutex       sync.RWMutex
+	streamKeys map[string]string // maps userID to streamKey
+	mutex      sync.RWMutex
 }
 
 // NewVideoStorage creates a new in-memory video storage
 func NewVideoStorage() *VideoStorage {
 	return &VideoStorage{
-		videos:      make(map[string]*video.Video),
-		streamKeys:  make(map[string]string),
+		videos:     make(map[string]*video.Video),
 		liveStreams: make(map[string]*video.LiveStream),
+		streamKeys: make(map[string]string),
+		mutex:      sync.RWMutex{},
 	}
 }
 
-// SaveVideo saves a video to memory
-func (s *VideoStorage) SaveVideo(ctx context.Context, v *video.Video) error {
+// SaveVideo saves a video to storage
+func (s *VideoStorage) SaveVideo(ctx context.Context, video *video.Video) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	
-	s.videos[v.ID] = v
+	s.videos[video.ID] = video
 	return nil
 }
 
-// GetVideo retrieves a video from memory
+// GetVideo retrieves a video by ID
 func (s *VideoStorage) GetVideo(ctx context.Context, id string) (*video.Video, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	
-	v, exists := s.videos[id]
-	if !exists {
-		return nil, fmt.Errorf("video not found: %s", id)
+	v, ok := s.videos[id]
+	if !ok {
+		return nil, errors.New("video not found")
 	}
 	
 	return v, nil
 }
 
-// ListVideos retrieves a list of videos from memory
+// ListVideos returns a list of videos
 func (s *VideoStorage) ListVideos(ctx context.Context, userID string, limit int, offset int) ([]*video.Video, int, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	
-	var videos []*video.Video
+	var result []*video.Video
 	var count int
 	
-	// If userID is provided, filter by user
-	if userID != "" {
-		for _, v := range s.videos {
-			if v.UserID == userID {
-				videos = append(videos, v)
+	// Filter by userID if provided
+	for _, v := range s.videos {
+		if userID == "" || v.UserID == userID {
+			count++
+			
+			// Apply pagination
+			if count > offset && (limit <= 0 || len(result) < limit) {
+				result = append(result, v)
 			}
 		}
-	} else {
-		// Otherwise, collect all videos
-		for _, v := range s.videos {
-			videos = append(videos, v)
-		}
 	}
 	
-	// Count total matching videos
-	count = len(videos)
-	
-	// Apply pagination
-	if offset >= len(videos) {
-		return []*video.Video{}, count, nil
-	}
-	
-	end := offset + limit
-	if end > len(videos) {
-		end = len(videos)
-	}
-	
-	return videos[offset:end], count, nil
+	return result, count, nil
 }
 
-// DeleteVideo removes a video from memory
+// DeleteVideo removes a video from storage
 func (s *VideoStorage) DeleteVideo(ctx context.Context, id string, userID string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	
-	v, exists := s.videos[id]
-	if !exists {
-		return fmt.Errorf("video not found: %s", id)
+	v, ok := s.videos[id]
+	if (!ok) {
+		return errors.New("video not found")
 	}
 	
-	// Verify user has permission to delete
-	if userID != "" && v.UserID != userID {
-		return fmt.Errorf("not authorized to delete video: %s", id)
+	// Check if the user owns the video
+	if v.UserID != userID {
+		return errors.New("not authorized to delete this video")
 	}
 	
 	delete(s.videos, id)
 	return nil
 }
 
-// SaveStreamKey saves a stream key to memory
+// SaveStreamKey stores a stream key for a user
 func (s *VideoStorage) SaveStreamKey(ctx context.Context, userID string, streamKey string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -113,20 +99,20 @@ func (s *VideoStorage) SaveStreamKey(ctx context.Context, userID string, streamK
 	return nil
 }
 
-// GetStreamKey retrieves a stream key from memory
+// GetStreamKey retrieves a stream key for a user
 func (s *VideoStorage) GetStreamKey(ctx context.Context, userID string) (string, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	
-	streamKey, exists := s.streamKeys[userID]
-	if (!exists) {
-		return "", fmt.Errorf("stream key not found for user: %s", userID)
+	key, ok := s.streamKeys[userID]
+	if (!ok) {
+		return "", errors.New("stream key not found")
 	}
 	
-	return streamKey, nil
+	return key, nil
 }
 
-// SaveLiveStream saves a live stream to memory
+// SaveLiveStream saves a live stream
 func (s *VideoStorage) SaveLiveStream(ctx context.Context, stream *video.LiveStream) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -135,74 +121,61 @@ func (s *VideoStorage) SaveLiveStream(ctx context.Context, stream *video.LiveStr
 	return nil
 }
 
-// GetLiveStream retrieves a live stream from memory
+// GetLiveStream retrieves a live stream by ID
 func (s *VideoStorage) GetLiveStream(ctx context.Context, streamID string) (*video.LiveStream, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	
-	stream, exists := s.liveStreams[streamID]
-	if (!exists) {
-		return nil, fmt.Errorf("live stream not found: %s", streamID)
+	stream, ok := s.liveStreams[streamID]
+	if (!ok) {
+		return nil, errors.New("live stream not found")
 	}
 	
 	return stream, nil
 }
 
-// EndLiveStream marks a live stream as ended in memory
+// EndLiveStream ends a live stream
 func (s *VideoStorage) EndLiveStream(ctx context.Context, streamID string, userID string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	
-	stream, exists := s.liveStreams[streamID]
-	if (!exists) {
-		return fmt.Errorf("live stream not found: %s", streamID)
+	stream, ok := s.liveStreams[streamID]
+	if (!ok) {
+		return errors.New("live stream not found")
 	}
 	
-	// Verify user has permission to end the stream
-	if (userID != "" && stream.UserID != userID) {
-		return fmt.Errorf("not authorized to end stream: %s", streamID)
+	// Check if the user owns the stream
+	if stream.UserID != userID {
+		return errors.New("not authorized to end this stream")
 	}
 	
 	// In a real implementation, we would mark the stream as ended
-	// For simplicity, we'll just remove it from the active streams
+	// but keep it in the database. For this in-memory implementation,
+	// we'll just remove it.
 	delete(s.liveStreams, streamID)
 	
 	return nil
 }
 
-// ListLiveStreams retrieves a list of active live streams from memory
+// ListLiveStreams returns active live streams
 func (s *VideoStorage) ListLiveStreams(ctx context.Context, userID string, limit int, offset int) ([]*video.LiveStream, int, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	
-	var streams []*video.LiveStream
+	var result []*video.LiveStream
+	var count int
 	
-	// If userID is provided, filter by user
-	if (userID != "") {
-		for _, stream := range s.liveStreams {
-			if (stream.UserID == userID) {
-				streams = append(streams, stream)
+	// Filter by userID if provided
+	for _, stream := range s.liveStreams {
+		if userID == "" || stream.UserID == userID {
+			count++
+			
+			// Apply pagination
+			if count > offset && (limit <= 0 || len(result) < limit) {
+				result = append(result, stream)
 			}
 		}
-	} else {
-		// Otherwise, collect all streams
-		for _, stream := range s.liveStreams {
-			streams = append(streams, stream)
-		}
 	}
 	
-	// Count total matching streams
-	count := len(streams)
-	
-	// Apply pagination
-	if (offset >= len(streams)) {
-		return []*video.LiveStream{}, count, nil
-	}
-	
-	end := offset + limit
-	if (end > len(streams)) {
-		end = len(streams)
-	}
-	
-	return streams[offset:end], count, nil
+	return result, count, nil
 }

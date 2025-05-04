@@ -19,6 +19,7 @@ service VideoService {
   rpc StartStream(StartStreamRequest) returns (StreamResponse) {}
   rpc EndStream(EndStreamRequest) returns (google.protobuf.Empty) {}
   rpc GetLiveStreams(GetLiveStreamsRequest) returns (GetLiveStreamsResponse) {}
+  rpc GetStream(GetStreamRequest) returns (GetStreamResponse) {} // Add this line
   
   // Transcoding
   rpc GetTranscodingStatus(GetTranscodingStatusRequest) returns (TranscodingStatusResponse) {}
@@ -146,6 +147,14 @@ message EndStreamRequest {
   string user_id = 2; // For authorization check
 }
 
+message GetStreamRequest {
+  string stream_id = 1;
+}
+
+message GetStreamResponse {
+  LiveStream stream = 1;
+}
+
 message GetLiveStreamsRequest {
   string user_id = 1; // Optional, filter by user
   int32 page_size = 2;
@@ -168,6 +177,7 @@ message LiveStream {
   int64 viewer_count = 7;
   google.protobuf.Timestamp started_at = 8;
   repeated string tags = 9;
+  string stream_key = 10;  // Added missing stream_key field
 }
 
 // Transcoding messages

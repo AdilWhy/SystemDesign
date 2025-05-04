@@ -1,145 +1,145 @@
 "use client";
 
-import { useState, useEffect } from 'react';
-import GrpcStreamCanvas from "@/components/GRPCCanvas";
-import { videoApi } from "@/lib/api";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import Image from "next/image";
 
-interface Video {
-  id: string;
+// Types for our API responses
+interface Stream {
+  streamId: string;
+  userId: string;
   title: string;
   description: string;
-  thumbnail_url?: string;
-  video_url?: string;
-  view_count: number;
-  duration_seconds: number;
+  thumbnailUrl: string;
+  viewerCount: number;
+  startedAt: string;
+}
+
+// API response type to match your Go backend
+interface ApiStream {
+  stream_id: string;
+  user_id: string;
+  title: string;
+  description: string;
+  thumbnail_url: string;
+  viewer_count: number;
+  started_at: string;
+  playback_url: string;
+  tags: string[];
 }
 
 export default function Home() {
-  const [videos, setVideos] = useState<Video[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [activeStreams, setActiveStreams] = useState<Stream[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchVideos = async () => {
+    // Fetch active streams on component mount
+    const fetchStreams = async () => {
       try {
-        setLoading(true);
-        const data = await videoApi.listVideos();
-        setVideos(data.videos || []);
-        setError(null);
+        setIsLoading(true);
+        // In a real implementation, this would be a call to your API
+        const response = await fetch("http://localhost:8080/api/v1/streams");
+        
+        if (!response.ok) {
+          throw new Error("Failed to fetch streams");
+        }
+        
+        const data = await response.json();
+        
+        // Map API response (snake_case) to our frontend model (camelCase)
+        const mappedStreams = (data.streams || []).map((apiStream: ApiStream) => ({
+          streamId: apiStream.stream_id,
+          userId: apiStream.user_id,
+          title: apiStream.title,
+          description: apiStream.description,
+          thumbnailUrl: apiStream.thumbnail_url,
+          viewerCount: apiStream.viewer_count,
+          startedAt: apiStream.started_at
+        }));
+        
+        setActiveStreams(mappedStreams);
       } catch (err) {
-        console.error('Failed to fetch videos:', err);
-        setError('Failed to load videos');
-        // Populate with mock data if the API fails
-        setVideos([
-          {
-            id: 'video-1',
-            title: 'Sample Gaming Stream',
-            description: 'This is a sample gaming stream',
-            thumbnail_url: 'https://placehold.co/320x180?text=Gaming',
-            view_count: 1200,
-            duration_seconds: 3600,
-          },
-          {
-            id: 'video-2',
-            title: 'Tech Talk',
-            description: 'Discussing the latest in tech',
-            thumbnail_url: 'https://placehold.co/320x180?text=Tech',
-            view_count: 850,
-            duration_seconds: 1800,
-          },
-          {
-            id: 'video-3',
-            title: 'Music Session',
-            description: 'Live music performance',
-            thumbnail_url: 'https://placehold.co/320x180?text=Music',
-            view_count: 3500,
-            duration_seconds: 2700,
-          },
-        ]);
+        console.error("Error fetching streams:", err);
+        setError(err instanceof Error ? err.message : "An unknown error occurred");
       } finally {
-        setLoading(false);
+        setIsLoading(false);
       }
     };
 
-    fetchVideos();
+    fetchStreams();
+    
+    // Poll for new streams every 30 seconds
+    const interval = setInterval(fetchStreams, 30000);
+    
+    // Clean up interval on component unmount
+    return () => clearInterval(interval);
   }, []);
 
-  // Format duration from seconds to MM:SS or HH:MM:SS
-  const formatDuration = (seconds: number): string => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const remainingSeconds = seconds % 60;
-
-    if (hours > 0) {
-      return `${hours}:${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
-    }
-    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-  };
-
-  // Format view count (e.g., 1.2k, 3.4M)
-  const formatViewCount = (count: number): string => {
-    if (count >= 1000000) {
-      return `${(count / 1000000).toFixed(1)}M views`;
-    }
-    if (count >= 1000) {
-      return `${(count / 1000).toFixed(1)}k views`;
-    }
-    return `${count} views`;
-  };
-
   return (
-    <div className="min-h-screen p-8 bg-gray-100">
-      <h1 className="text-3xl font-bold mb-8 text-center">Twitch-like Video Streaming Platform</h1>
-
-      {/* Featured Live Stream */}
-      <div className="mb-12">
-        <h2 className="text-2xl font-bold mb-4">Featured Live Stream</h2>
-        <div className="max-w-6xl mx-auto h-[600px] shadow-xl rounded-lg overflow-hidden border border-gray-300">
-          <GrpcStreamCanvas />
-        </div>
-      </div>
-
-      {/* Videos Section */}
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold mb-4">Recommended Videos</h2>
+    <main className="flex min-h-screen flex-col items-center p-6 bg-gray-900 text-white">
+      <div className="w-full max-w-6xl">
+        <h1 className="text-4xl font-bold mb-8">Live Streams</h1>
+        
+        {isLoading && <p className="text-center text-lg">Loading streams...</p>}
         
         {error && (
-          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+          <div className="bg-red-500 text-white p-4 rounded-md mb-6">
             {error}
           </div>
         )}
-
-        {loading ? (
-          <div className="flex justify-center items-center h-40">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-700"></div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {videos.map(video => (
-              <div 
-                key={video.id} 
-                className="bg-white rounded-lg overflow-hidden shadow-md hover:shadow-lg transition-shadow"
-              >
-                <div className="relative">
-                  <img 
-                    src={video.thumbnail_url || `https://placehold.co/320x180?text=${encodeURIComponent(video.title)}`} 
-                    alt={video.title}
-                    className="w-full h-48 object-cover"
-                  />
-                  <div className="absolute bottom-2 right-2 bg-black bg-opacity-70 text-white text-xs px-2 py-1 rounded">
-                    {formatDuration(video.duration_seconds)}
-                  </div>
-                </div>
-                <div className="p-4">
-                  <h3 className="font-semibold text-lg mb-1 line-clamp-2">{video.title}</h3>
-                  <p className="text-gray-600 text-sm mb-2">{formatViewCount(video.view_count)}</p>
-                  <p className="text-gray-500 text-sm line-clamp-2">{video.description}</p>
-                </div>
-              </div>
-            ))}
+        
+        {!isLoading && activeStreams.length === 0 && (
+          <div className="text-center py-12">
+            <h2 className="text-xl mb-4">No active streams right now</h2>
+            <p className="mb-6">Be the first to start streaming!</p>
+            <Link 
+              href="/stream/create" 
+              className="bg-purple-600 hover:bg-purple-700 px-6 py-3 rounded-md font-medium transition"
+            >
+              Start Streaming
+            </Link>
           </div>
         )}
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {activeStreams.map((stream) => (
+            <Link 
+              href={`/stream/${stream.streamId}`} 
+              key={stream.streamId}
+              className="bg-gray-800 rounded-lg overflow-hidden hover:ring-2 hover:ring-purple-500 transition"
+            >
+              <div className="relative h-48 w-full">
+                {stream.thumbnailUrl ? (
+                  <Image
+                    src={stream.thumbnailUrl}
+                    alt={stream.title}
+                    fill
+                    className="object-cover"
+                  />
+                ) : (
+                  <div className="w-full h-full bg-gray-700 flex items-center justify-center">
+                    <span className="text-gray-500">No thumbnail</span>
+                  </div>
+                )}
+                <div className="absolute top-2 right-2 bg-red-600 px-2 py-1 rounded text-sm font-medium">
+                  LIVE
+                </div>
+                <div className="absolute bottom-2 right-2 bg-black bg-opacity-70 px-2 py-1 rounded text-sm">
+                  {stream.viewerCount} viewers
+                </div>
+              </div>
+              <div className="p-4">
+                <h3 className="font-bold text-lg mb-1 truncate">{stream.title}</h3>
+                <p className="text-gray-400 text-sm mb-2 truncate">{stream.description}</p>
+                <p className="text-gray-500 text-xs">
+                  Started {new Date(stream.startedAt).toLocaleTimeString()}
+                </p>
+              </div>
+            </Link>
+          ))}
+        </div>
       </div>
-    </div>
+    </main>
   );
 }

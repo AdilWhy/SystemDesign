@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -30,6 +31,9 @@ type S3Config struct {
 
 // NewS3Storage creates a new S3Storage instance
 func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
+	// Create a custom credentials provider
+	provider := credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, "")
+
 	// Create AWS configuration
 	customResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 		if cfg.Endpoint != "" {
@@ -47,6 +51,7 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 	awsCfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(cfg.Region),
 		config.WithEndpointResolverWithOptions(customResolver),
+		config.WithCredentialsProvider(provider),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
@@ -180,4 +185,10 @@ func (s *S3Storage) GetObjectMetadata(ctx context.Context, key string) (map[stri
 	metadata["ContentLength"] = fmt.Sprintf("%d", resp.ContentLength)
 
 	return metadata, nil
+}
+
+// GetObjectURL returns a direct URL to an object in S3
+// Note: This is not a pre-signed URL and will only work for public objects
+func (s *S3Storage) GetObjectURL(key string) string {
+	return fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", s.bucketName, s.region, key)
 }

@@ -16,6 +16,17 @@ const (
 	VideoStatus_VIDEO_STATUS_FAILED      VideoStatus = 4
 )
 
+// StreamStatus represents the status of a live stream
+type StreamStatus int32
+
+const (
+	StreamStatus_STREAM_STATUS_UNSPECIFIED StreamStatus = 0
+	StreamStatus_STREAM_STATUS_CREATED     StreamStatus = 1
+	StreamStatus_STREAM_STATUS_LIVE        StreamStatus = 2
+	StreamStatus_STREAM_STATUS_ENDED       StreamStatus = 3
+	StreamStatus_STREAM_STATUS_ERROR       StreamStatus = 4
+)
+
 // VideoVisibility represents the visibility of a video
 type VideoVisibility int32
 
@@ -49,6 +60,8 @@ const (
 	TranscodingStatus_TRANSCODING_STATUS_PROCESSING  TranscodingStatus = 2
 	TranscodingStatus_TRANSCODING_STATUS_COMPLETED   TranscodingStatus = 3
 	TranscodingStatus_TRANSCODING_STATUS_FAILED      TranscodingStatus = 4
+	TranscodingStatus_TRANSCODING_STATUS_ERROR       TranscodingStatus = 4  // Alias for FAILED
+	TranscodingStatus_TRANSCODING_STATUS_NOT_FOUND   TranscodingStatus = 5
 )
 
 // Video represents a video entity
@@ -182,6 +195,17 @@ type LiveStream struct {
 	ViewerCount  int64
 	StartedAt    *timestamppb.Timestamp
 	Tags         []string
+	StreamKey    string // Added stream_key field to match the proto definition
+}
+
+// GetStreamRequest represents a request to get a specific stream by ID
+type GetStreamRequest struct {
+	StreamId string
+}
+
+// GetStreamResponse represents a response with details of a specific stream
+type GetStreamResponse struct {
+	Stream *LiveStream
 }
 
 // GetTranscodingStatusRequest represents a request for transcoding status
@@ -242,6 +266,10 @@ func (UnimplementedVideoServiceServer) EndStream(interface{}, interface{}) (inte
 }
 
 func (UnimplementedVideoServiceServer) GetLiveStreams(interface{}, interface{}) (interface{}, error) {
+	return nil, nil
+}
+
+func (UnimplementedVideoServiceServer) GetStream(interface{}, interface{}) (interface{}, error) {
 	return nil, nil
 }
 

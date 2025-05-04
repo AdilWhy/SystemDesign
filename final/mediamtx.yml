@@ -1,0 +1,29 @@
+# API Configuration
+api: yes
+apiAddress: :9997
+
+# RTSP Configuration
+rtspAddress: :8554
+protocols: [tcp, udp]
+rtspsAddress: :8322
+
+# RTMP Configuration
+rtmpAddress: :1935
+rtmpsAddress: :1936
+
+# HLS Configuration
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+hlsSegmentCount: 3
+hlsSegmentDuration: 1s
+
+# CORS Configuration - Add this to fix NetworkError issues
+cors: yes
+corsAllowOrigin: "*"
+corsAllowCredentials: yes
+corsAllowMethods: [GET, POST, OPTIONS]
+corsAllowHeaders: [Accept, Accept-Language, Content-Language, Content-Type, Origin, X-Requested-With]
+corsExposeHeaders: [Content-Length, Content-Type]
+# Reduce HLS latency
+hlsPartDuration: 0.2s
+hlsSegmentMinSize: 100K

@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -17,11 +20,50 @@ import (
 	"github.com/joho/godotenv"
 	"google.golang.org/grpc"
 
+	"videostreaming/internal/service/streaming"
 	"videostreaming/internal/service/transcode"
 	"videostreaming/internal/service/video"
+	"videostreaming/internal/storage/filesystem"
 	"videostreaming/internal/storage/memory"
 	pb "videostreaming/proto/video"
 )
+
+// TranscodingServiceAdapter adapts transcode.Service to video.TranscodingService
+type TranscodingServiceAdapter struct {
+	transcodeService *transcode.Service
+}
+
+// StartTranscoding delegates to the underlying transcode service
+func (a *TranscodingServiceAdapter) StartTranscoding(ctx context.Context, videoID string, inputPath string) error {
+	return a.transcodeService.StartTranscoding(ctx, videoID, inputPath)
+}
+
+// GetTranscodingStatus adapts the response from transcode service to video service
+func (a *TranscodingServiceAdapter) GetTranscodingStatus(ctx context.Context, videoID string) (*video.TranscodingStatus, error) {
+	status, err := a.transcodeService.GetTranscodingStatus(ctx, videoID)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Convert the proto response to video.TranscodingStatus
+	jobs := make([]*video.TranscodingJob, 0, len(status.Jobs))
+	for _, job := range status.Jobs {
+		jobs = append(jobs, &video.TranscodingJob{
+			JobID:        job.JobId,
+			Resolution:   job.Resolution,
+			Status:       job.Status,
+			Progress:     job.Progress,
+			ErrorMessage: job.ErrorMessage,
+		})
+	}
+	
+	return &video.TranscodingStatus{
+		VideoID:         status.VideoId,
+		Status:          status.Status,
+		Jobs:            jobs,
+		OverallProgress: status.OverallProgress,
+	}, nil
+}
 
 func main() {
 	// Load environment variables
@@ -29,32 +71,55 @@ func main() {
 		log.Println("No .env file found, using environment variables")
 	}
 
-	// Initialize S3 storage with a mock implementation for development
-	s3Storage := &mockS3Storage{}
+	// Set up storage directories
+	mediaDir := getEnv("MEDIA_DIR", "./media")
+	if err := os.MkdirAll(mediaDir, 0755); err != nil {
+		log.Fatalf("Failed to create media directory: %v", err)
+	}
 
-	// Create storage implementations
-	// Using in-memory storage for development
+	// Create file storage for videos and thumbnails
+	baseURL := getEnv("BASE_URL", "http://localhost:8080")
+	fileStorage, err := filesystem.NewFileSystemStorage(mediaDir, baseURL)
+	if err != nil {
+		log.Fatalf("Failed to create file storage: %v", err)
+	}
+
+	// Create in-memory storage for video metadata
 	videoStorage := memory.NewVideoStorage()
 
 	// Create mock implementations for development
-	// In production, these would be real implementations
 	ffmpegClient := &mockFFmpegClient{}
 	notificationService := &mockNotificationService{}
-	streamingEngine := &mockStreamingEngine{}
+	
+	// Create real MediaMTX streaming engine
+	// The MediaMTX server is running on:
+	// - RTMP port 1935
+	// - HLS port 8888
+	// - WebRTC port 8889
+	streamingEngine := streaming.NewMediaMTXEngine(
+		getEnv("RTMP_URL", "rtmp://localhost:1935/live"),
+		getEnv("HLS_URL", "http://localhost:8888/live"),
+		getEnv("WEBRTC_URL", "http://localhost:8889/live"),
+	)
 	
 	// Create transcoding service
 	transcodingService := transcode.NewService(
 		&mockTranscodeStorage{}, 
 		ffmpegClient, 
-		s3Storage, 
+		fileStorage, // Use fileStorage instead of S3Storage 
 		notificationService,
 	)
+	
+	// Create adapter for the transcoding service
+	transcodeAdapter := &TranscodingServiceAdapter{
+		transcodeService: transcodingService,
+	}
 
 	// Create video service
 	videoService := video.NewService(
 		videoStorage,
-		s3Storage,
-		transcodingService,
+		fileStorage, // Use fileStorage instead of S3Storage
+		transcodeAdapter, // Use the adapter instead of the raw transcoding service
 		streamingEngine,
 	)
 
@@ -62,25 +127,10 @@ func main() {
 	go startGRPCServer(videoService)
 
 	// Start REST API server
-	go startRESTServer(videoService)
+	go startRESTServer(videoService, fileStorage)
 
 	// Wait for termination signal
 	waitForSignal()
-}
-
-// mockS3Storage implements a simple mock of the S3 storage for testing
-type mockS3Storage struct{}
-
-func (m *mockS3Storage) GenerateUploadURL(ctx context.Context, key string, contentType string, expiresIn time.Duration) (string, error) {
-	return fmt.Sprintf("https://mock-upload-url.example.com/%s", key), nil
-}
-
-func (m *mockS3Storage) GenerateDownloadURL(ctx context.Context, key string, expiresIn time.Duration) (string, error) {
-	return fmt.Sprintf("https://mock-download-url.example.com/%s", key), nil
-}
-
-func (m *mockS3Storage) DeleteObject(ctx context.Context, key string) error {
-	return nil
 }
 
 func startGRPCServer(videoService *video.Service) {
@@ -99,7 +149,7 @@ func startGRPCServer(videoService *video.Service) {
 	}
 }
 
-func startRESTServer(videoService *video.Service) {
+func startRESTServer(videoService *video.Service, fileStorage *filesystem.FileSystemStorage) {
 	router := chi.NewRouter()
 
 	// Middleware
@@ -119,7 +169,11 @@ func startRESTServer(videoService *video.Service) {
 		w.Write([]byte("OK"))
 	})
 
-	// Example video routes
+	// File upload/download endpoints
+	router.Post("/upload", handleFileUpload(fileStorage))
+	router.Get("/download/{path:.+}", handleFileDownload(fileStorage))
+
+	// API routes
 	router.Route("/api/v1", func(r chi.Router) {
 		r.Route("/videos", func(r chi.Router) {
 			r.Get("/", handleListVideos(videoService))
@@ -134,6 +188,7 @@ func startRESTServer(videoService *video.Service) {
 			r.Post("/key", handleGetStreamKey(videoService))
 			r.Post("/", handleStartStream(videoService))
 			r.Delete("/{streamID}", handleEndStream(videoService))
+			r.Get("/{streamID}", handleGetStream(videoService)) // Add this line to handle GET request for a specific stream
 		})
 	})
 
@@ -163,8 +218,101 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// File handling functions
+
+func handleFileUpload(fs *filesystem.FileSystemStorage) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Get the path from the query
+		path := r.URL.Query().Get("path")
+		if path == "" {
+			http.Error(w, "Path is required", http.StatusBadRequest)
+			return
+		}
+
+		// Parse the multipart form, 32MB max
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to parse form: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Get the file
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get file: %v", err), http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		// Read the file
+		buffer := make([]byte, header.Size)
+		if _, err := file.Read(buffer); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to read file: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Save the file
+		if err := fs.SaveFile(path, buffer); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to save file: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": true}`))
+	}
+}
+
+func handleFileDownload(fs *filesystem.FileSystemStorage) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pathParam := chi.URLParam(r, "path")
+		if pathParam == "" {
+			http.Error(w, "Path is required", http.StatusBadRequest)
+			return
+		}
+
+		// Clean the path to prevent directory traversal
+		path := filepath.Clean(pathParam)
+
+		// Get the file data
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, "File not found", http.StatusNotFound)
+			} else {
+				http.Error(w, fmt.Sprintf("Failed to read file: %v", err), http.StatusInternalServerError)
+			}
+			return
+		}
+
+		// Set content type based on file extension
+		contentType := http.DetectContentType(data)
+		if ext := filepath.Ext(path); ext != "" {
+			switch ext {
+			case ".mp4":
+				contentType = "video/mp4"
+			case ".m3u8":
+				contentType = "application/vnd.apple.mpegurl"
+			case ".ts":
+				contentType = "video/mp2t"
+			case ".jpg", ".jpeg":
+				contentType = "image/jpeg"
+			case ".png":
+				contentType = "image/png"
+			}
+		}
+
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+	}
+}
+
 // Mock implementations for development purposes
-// In production, these would be replaced with real implementations
 
 type mockFFmpegClient struct{}
 
@@ -290,36 +438,188 @@ func handleDeleteVideo(svc *video.Service) http.HandlerFunc {
 
 func handleListStreams(svc *video.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Implementation for listing live streams
+			// Get query parameters
+		userID := r.URL.Query().Get("user_id")
+		pageSizeStr := r.URL.Query().Get("page_size")
+		pageToken := r.URL.Query().Get("page_token")
+		
+		pageSize := int32(20) // Default page size
+		if pageSizeStr != "" {
+			if size, err := strconv.Atoi(pageSizeStr); err == nil && size > 0 {
+				pageSize = int32(size)
+			}
+		}
+		
+		// Call the service to list streams
+		response, err := svc.GetLiveStreams(r.Context(), &pb.GetLiveStreamsRequest{
+			UserId:    userID,
+			PageSize:  pageSize,
+			PageToken: pageToken,
+		})
+		
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to list streams: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		// Convert the streams to a format suitable for JSON
+		streams := make([]map[string]interface{}, 0, len(response.Streams))
+		for _, stream := range response.Streams {
+			streams = append(streams, map[string]interface{}{
+				"stream_id":     stream.StreamId,
+				"user_id":       stream.UserId,
+				"title":         stream.Title,
+				"description":   stream.Description,
+				"thumbnail_url": stream.ThumbnailUrl,
+				"playback_url":  stream.PlaybackUrl,
+				"viewer_count":  stream.ViewerCount,
+				"started_at":    stream.StartedAt.AsTime(),
+				"tags":          stream.Tags,
+			})
+		}
+		
+		// Send response
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"streams": []}`))
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"streams":        streams,
+			"next_page_token": response.NextPageToken,
+			"total_count":    response.TotalCount,
+		})
 	}
 }
 
 func handleGetStreamKey(svc *video.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Implementation for getting stream key
+		// Parse request body
+		var requestData struct {
+			UserID string `json:"user_id"`
+		}
+		
+		if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+		
+		// Call the service to get or generate stream key
+		response, err := svc.GetStreamKey(r.Context(), &pb.GetStreamKeyRequest{
+			UserId: requestData.UserID,
+		})
+		
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get stream key: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		// Send response
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"stream_key": "sample-key", "rtmp_url": "rtmp://example.com/live"}`))
+		json.NewEncoder(w).Encode(map[string]string{
+			"stream_key": response.StreamKey,
+			"rtmp_url":   response.RtmpUrl,
+		})
 	}
 }
 
 func handleStartStream(svc *video.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Implementation for starting stream
+		// Parse request body
+		var requestData struct {
+			UserID      string   `json:"user_id"`
+			StreamKey   string   `json:"stream_key"`
+			Title       string   `json:"title"`
+			Description string   `json:"description"`
+			Tags        []string `json:"tags"`
+		}
+		
+		if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+		
+		// Call the service to start the stream
+		response, err := svc.StartStream(r.Context(), &pb.StartStreamRequest{
+			UserId:      requestData.UserID,
+			StreamKey:   requestData.StreamKey,
+			Title:       requestData.Title,
+			Description: requestData.Description,
+			Tags:        requestData.Tags,
+		})
+		
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to start stream: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		// Send response
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"stream_id": "stream-123", "playback_url": "https://example.com/stream.m3u8"}`))
+		json.NewEncoder(w).Encode(map[string]string{
+			"stream_id":    response.StreamId,
+			"playback_url": response.PlaybackUrl,
+			"stream_key":   response.StreamKey,
+		})
 	}
 }
 
 func handleEndStream(svc *video.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Implementation for ending stream
+		// Get stream ID from URL params
+		streamID := chi.URLParam(r, "streamID")
+		
+		// Parse request body
+		var requestData struct {
+			UserID string `json:"user_id"`
+		}
+		
+		if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+		
+		// Call the service to end the stream
+		_, err := svc.EndStream(r.Context(), &pb.EndStreamRequest{
+			StreamId: streamID,
+			UserId:   requestData.UserID,
+		})
+		
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to end stream: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		// Send success response
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"success": true}`))
+		json.NewEncoder(w).Encode(map[string]bool{
+			"success": true,
+		})
+	}
+}
+
+func handleGetStream(svc *video.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get stream ID from URL params
+		streamID := chi.URLParam(r, "streamID")
+		
+		// Call the service to get stream details
+		response, err := svc.GetStream(r.Context(), &pb.GetStreamRequest{
+			StreamId: streamID,
+		})
+		
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get stream: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		// Send response
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"stream_id":     response.Stream.StreamId,
+			"user_id":       response.Stream.UserId,
+			"title":         response.Stream.Title,
+			"description":   response.Stream.Description,
+			"thumbnail_url": response.Stream.ThumbnailUrl,
+			"playback_url":  response.Stream.PlaybackUrl,
+			"viewer_count":  response.Stream.ViewerCount,
+			"started_at":    response.Stream.StartedAt.AsTime(),
+			"tags":          response.Stream.Tags,
+		})
 	}
 }
