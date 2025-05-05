@@ -1,29 +1,106 @@
-# API Configuration
 api: yes
-apiAddress: :9997
-
-# RTSP Configuration
-rtspAddress: :8554
-protocols: [tcp, udp]
-rtspsAddress: :8322
-
-# RTMP Configuration
+rtmp: yes
+# Address of the RTMP listener. This is needed only when encryption is "no" or "optional".
 rtmpAddress: :1935
+# Encrypt connections with TLS (RTMPS).
+# Available values are "no", "strict", "optional".
+rtmpEncryption: "no"
+# Address of the RTMPS listener. This is needed only when encryption is "strict" or "optional".
 rtmpsAddress: :1936
 
-# HLS Configuration
+# Enable reading streams with the HLS protocol.
+hls: yes
+# Address of the HLS listener.
 hlsAddress: :8888
-hlsAlwaysRemux: yes
-hlsSegmentCount: 3
+# Enable TLS/HTTPS on the HLS server.
+# This is required for Low-Latency HLS.
+hlsEncryption: no
+# Value of the Access-Control-Allow-Origin header provided in every HTTP response.
+# This allows to play the HLS stream from an external website.
+hlsAllowOrigin: '*'
+# List of IPs or CIDRs of proxies placed before the HLS server.
+# If the server receives a request from one of these entries, IP in logs
+# will be taken from the X-Forwarded-For header.
+hlsTrustedProxies: []
+# By default, HLS is generated only when requested by a user.
+# This option allows to generate it always, avoiding the delay between request and generation.
+hlsAlwaysRemux: no
+# Variant of the HLS protocol to use. Available options are:
+# * mpegts - uses MPEG-TS segments, for maximum compatibility.
+# * fmp4 - uses fragmented MP4 segments, more efficient.
+# * lowLatency - uses Low-Latency HLS.
+hlsVariant: lowLatency
+# Number of HLS segments to keep on the server.
+# Segments allow to seek through the stream.
+# Their number doesn't influence latency.
+hlsSegmentCount: 7
+# Minimum duration of each segment.
+# A player usually puts 3 segments in a buffer before reproducing the stream.
+# The final segment duration is also influenced by the interval between IDR frames,
+# since the server changes the duration in order to include at least one IDR frame
+# in each segment.
 hlsSegmentDuration: 1s
+# Minimum duration of each part.
+# A player usually puts 3 parts in a buffer before reproducing the stream.
+# Parts are used in Low-Latency HLS in place of segments.
+# Part duration is influenced by the distance between video/audio samples
+# and is adjusted in order to produce segments with a similar duration.
+hlsPartDuration: 200ms
+# Maximum size of each segment.
+# This prevents RAM exhaustion.
+hlsSegmentMaxSize: 50M
+# Directory in which to save segments, instead of keeping them in the RAM.
+# This decreases performance, since reading from disk is less performant than
+# reading from RAM, but allows to save RAM.
+hlsDirectory: ''
+# The muxer will be closed when there are no
+# reader requests and this amount of time has passed.
+hlsMuxerCloseAfter: 60s
 
-# CORS Configuration - Add this to fix NetworkError issues
-cors: yes
-corsAllowOrigin: "*"
-corsAllowCredentials: yes
-corsAllowMethods: [GET, POST, OPTIONS]
-corsAllowHeaders: [Accept, Accept-Language, Content-Language, Content-Type, Origin, X-Requested-With]
-corsExposeHeaders: [Content-Length, Content-Type]
-# Reduce HLS latency
-hlsPartDuration: 0.2s
-hlsSegmentMinSize: 100K
+###############################################
+# Path settings
+
+# Settings in "paths" are applied to specific paths, and the map key
+# is the name of the path.
+# Any setting in "pathDefaults" can be overridden here.
+# It's possible to use regular expressions by using a tilde as prefix,
+# for example "~^(test1|test2)$" will match both "test1" and "test2",
+# for example "~^prefix" will match all paths that start with "prefix".
+paths:
+  mystream:
+    source: publisher
+    runOnReady: >
+      ffmpeg -i rtsp://localhost:$RTSP_PORT/$MTX_PATH
+        -c:v libx264 -pix_fmt yuv420p -preset ultrafast -b:v 600k
+        -g 30 -keyint_min 30 -sc_threshold 0 -hls_time 2 -hls_list_size 10
+        -hls_flags delete_segments -hls_segment_type mpegts
+        -f hls /var/www/html/hls/$MTX_PATH/index.m3u8
+    runOnReadyRestart: yes
+
+  # example:
+  # my_camera:
+  #   source: rtsp://my_camera
+
+  # Settings under path "all_others" are applied to all paths that
+  # do not match another entry.
+  all_others:
+    source: publisher
+    
+authInternalUsers:
+  # Username. 'any' means any user, including anonymous ones.
+- user: any
+  # Password. Not used in case of 'any' user.
+  pass:
+  # IPs or networks allowed to use this user. An empty list means any IP.
+  ips: []
+  # List of permissions.
+  permissions:
+    # Available actions are: publish, read, playback, api, metrics, pprof.
+  - action: api
+    path:
+  - action: read
+    path:
+  - action: playback
+    path:
+  - action: publish
+    path: 

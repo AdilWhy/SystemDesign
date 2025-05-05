@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming Platform</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- Include HLS.js for HLS playback -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Live Streaming Platform</h1>
+        </header>
+        
+        <main>
+            <div class="player-container">
+                <video id="videoPlayer" controls></video>
+                <div class="player-controls">
+                    <input type="text" id="streamPath" placeholder="Enter stream path (e.g., mystream)">
+                    <button id="playButton">Play Stream</button>
+                </div>
+            </div>
+            
+            <div class="stream-info">
+                <h2>Stream Information</h2>
+                <div id="streamStatus">No stream selected</div>
+            </div>
+            
+            <div class="available-streams">
+                <h2>Available Streams</h2>
+                <ul id="streamList">
+                    <li>Loading streams...</li>
+                </ul>
+            </div>
+        </main>
+        
+        <footer>
+            <p>&copy; 2025 My Streaming Platform</p>
+        </footer>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>

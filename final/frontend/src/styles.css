@@ -1,0 +1,162 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: Arial, sans-serif;
+    line-height: 1.6;
+    color: #333;
+    background-color: #f4f4f4;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+header {
+    background-color: #333;
+    color: #fff;
+    padding: 20px;
+    text-align: center;
+    margin-bottom: 20px;
+    border-radius: 5px;
+}
+
+main {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 20px;
+}
+
+.player-container {
+    grid-column: 1 / 2;
+    grid-row: 1 / 2;
+    background-color: #fff;
+    border-radius: 5px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    padding: 20px;
+}
+
+#videoPlayer {
+    width: 100%;
+    height: 400px;
+    background-color: #000;
+    border-radius: 5px;
+    margin-bottom: 10px;
+}
+
+.player-controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+#streamPath {
+    flex-grow: 1;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+}
+
+#playButton {
+    padding: 10px 20px;
+    background-color: #333;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+#playButton:hover {
+    background-color: #555;
+}
+
+.stream-info {
+    grid-column: 2 / 3;
+    grid-row: 1 / 2;
+    background-color: #fff;
+    border-radius: 5px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    padding: 20px;
+}
+
+.available-streams {
+    grid-column: 1 / 3;
+    grid-row: 2 / 3;
+    background-color: #fff;
+    border-radius: 5px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    padding: 20px;
+    margin-top: 20px;
+}
+
+#streamList {
+    list-style: none;
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+}
+
+#streamList li {
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+#streamList li:hover {
+    background-color: #f0f0f0;
+}
+
+#streamStatus {
+    margin-top: 10px;
+    padding: 15px;
+    background-color: #f9f9f9;
+    border-radius: 5px;
+    border: 1px solid #ddd;
+}
+
+footer {
+    text-align: center;
+    margin-top: 20px;
+    padding: 20px;
+    background-color: #333;
+    color: #fff;
+    border-radius: 5px;
+}
+
+@media (max-width: 768px) {
+    main {
+        grid-template-columns: 1fr;
+    }
+    
+    .player-container, .stream-info, .available-streams {
+        grid-column: 1;
+    }
+    
+    .player-container {
+        grid-row: 1;
+    }
+    
+    .stream-info {
+        grid-row: 2;
+    }
+    
+    .available-streams {
+        grid-row: 3;
+    }
+    
+    #videoPlayer {
+        height: 300px;
+    }
+    
+    #streamList {
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    }
+}

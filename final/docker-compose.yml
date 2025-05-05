@@ -1,8 +1,36 @@
 services:
   mediamtx:
-    image: bluenviron/mediamtx:latest
+    image: bluenviron/mediamtx:latest-ffmpeg
     container_name: mediamtx
-    network_mode: host  # Recommended
+    environment:
+      - MTX_RTSPTRANSPORTS=tcp
+      - MTX_WEBRTCADDITIONALHOSTS=192.168.x.x
+    ports:
+      - 8554:8554
+      - 1935:1935
+      - 8888:8888
+      - 8889:8889
+      - 8890:8890/udp
+      - 8189:8189/udp
+      - 9997:9997
     volumes:
-      - ./mediamtx.yml:/mediamtx.yml
+      - ./mediamtx.yml:/mediamtx.yml:ro
     restart: unless-stopped
+    networks:
+      - streaming_network
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: streaming-frontend
+    ports:
+      - 80:80
+    restart: unless-stopped
+    networks:
+      - streaming_network
+    depends_on:
+      - mediamtx
+
+networks:
+  streaming_network:
+    driver: bridge
